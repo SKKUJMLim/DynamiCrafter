@@ -157,6 +157,7 @@ class DDIMSampler(object):
             
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
+
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         if verbose:
             iterator = tqdm(time_range, desc='DDIM Sampler', total=total_steps)
@@ -167,6 +168,8 @@ class DDIMSampler(object):
 
         # cond_copy, unconditional_conditioning_copy = copy.deepcopy(cond), copy.deepcopy(unconditional_conditioning)
         for i, step in enumerate(iterator):
+
+            # DDIM 디노이징 단계(step index)
             index = total_steps - i - 1
             ts = torch.full((b,), step, device=device, dtype=torch.long)
 
@@ -177,9 +180,8 @@ class DDIMSampler(object):
                     img_orig = x0
                 else:
                     img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass? <ddim inversion>
+
                 img = img_orig * mask + (1. - mask) * img # keep original & modify use img
-
-
 
 
             outs = self.p_sample_ddim(img, cond, ts, index=index, use_original_steps=ddim_use_original_steps,

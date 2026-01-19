@@ -267,6 +267,7 @@ def run_inference(args, gpu_num, gpu_no):
     ## run over data
     assert (args.height % 16 == 0) and (args.width % 16 == 0), "Error: image size [h,w] should be multiples of 16!"
     assert args.bs == 1, "Current implementation only support [batch size = 1]!"
+
     ## latent noise shape
     h, w = args.height // 8, args.width // 8
     channels = model.model.diffusion_model.out_channels

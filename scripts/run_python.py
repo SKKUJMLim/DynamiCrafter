@@ -65,5 +65,5 @@ def main():
     subprocess.run(cmd, check=True)
 
 if __name__ == "__main__":
-    # python run_inference.py 256
+    # python scripts/run_python.py 256
     main()

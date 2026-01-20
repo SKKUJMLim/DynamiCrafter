@@ -16,6 +16,15 @@ from lvdm.models.samplers.ddim_multiplecond import DDIMSampler as DDIMSampler_mu
 from utils.utils import instantiate_from_config
 import random
 
+from energy.jepa_score import load_vjepa2_encoder, jepa_score_exact, jepa_energy_jvp, jepa_energy_fd
+import torch.nn.functional as F
+
+
+# jepa_energy_jvp를 위한 Attention kernel 비활성화
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
 
 def get_filelist(data_dir, postfixes):
     patterns = [os.path.join(data_dir, f"*.{postfix}") for postfix in postfixes]
@@ -163,7 +172,7 @@ def get_latent_z(model, videos):
     return z
 
 
-def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
+def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
                         unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False, multiple_cond_cfg=False, loop=False, interp=False, timestep_spacing='uniform', guidance_rescale=0.0, **kwargs):
     ddim_sampler = DDIMSampler(model) if not multiple_cond_cfg else DDIMSampler_multicond(model)
     batch_size = noise_shape[0]
@@ -246,11 +255,53 @@ def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddi
 
         ## reconstruct from latent to pixel space
         batch_images = model.decode_first_stage(samples)
+
+        vid = batch_images[:1]  # (1,C,T,H,W)
+        # vid = downsample_video(vid, 4, 512)
+
+        print("JVP-JEPA energy calculate...")
+        energy = jepa_energy_fd(
+            encoder_fn=vjepa,
+            x=vid.float(),
+            n_dir=4, # k라고 볼수 있음
+            eps=1e-3,
+        )
+        print("FD-JEPA energy:", energy.item())
+
         batch_variants.append(batch_images)
 
     ## variants, batch, c, t, h, w
     batch_variants = torch.stack(batch_variants)
     return batch_variants.permute(1, 0, 2, 3, 4, 5)
+
+
+def downsample_video(
+    vid,
+    t_keep=4,
+    hw_keep=128,
+):
+    """
+    vid: (B, C, T, H, W)
+    return: (B, C, T_small, hw_keep, hw_keep)
+    """
+    B, C, T, H, W = vid.shape
+
+    # 1) 시간 축 줄이기 (앞쪽 프레임만 사용)
+    T_small = min(T, t_keep)
+    vid = vid[:, :, :T_small].contiguous()  # (B, C, T_small, H, W)
+
+    # 2) 프레임별로 2D resize
+    #    interpolate는 (N,C,H,W) 입력을 기대하므로 reshape 필요
+    vid_ = vid.permute(0, 2, 1, 3, 4).reshape(B * T_small, C, H, W)
+    vid_ = F.interpolate(
+        vid_,
+        size=(hw_keep, hw_keep),
+        mode="bilinear",
+        align_corners=False,
+    )
+    vid = vid_.reshape(B, T_small, C, hw_keep, hw_keep).permute(0, 2, 1, 3, 4).contiguous()
+
+    return vid
 
 
 def run_inference(args, gpu_num, gpu_no):
@@ -297,6 +348,8 @@ def run_inference(args, gpu_num, gpu_no):
     data_list_rank = [data_list[i] for i in indices]
     filename_list_rank = [filename_list[i] for i in indices]
 
+    vjepa = load_vjepa2_encoder(device="cuda")
+
     start = time.time()
     with torch.no_grad(), torch.cuda.amp.autocast():
         for idx, indice in tqdm(enumerate(range(0, len(prompt_list_rank), args.bs)), desc='Sample Batch'):
@@ -308,7 +361,7 @@ def run_inference(args, gpu_num, gpu_no):
             else:
                 videos = videos.unsqueeze(0).to("cuda")
 
-            batch_samples = image_guided_synthesis(model, prompts, videos, noise_shape, args.n_samples, args.ddim_steps, args.ddim_eta, \
+            batch_samples = image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, args.n_samples, args.ddim_steps, args.ddim_eta, \
                                 args.unconditional_guidance_scale, args.cfg_img, args.frame_stride, args.text_input, args.multiple_cond_cfg, args.loop, args.interp, args.timestep_spacing, args.guidance_rescale)
 
             ## save each example individually

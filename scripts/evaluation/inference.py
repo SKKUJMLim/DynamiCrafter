@@ -218,11 +218,13 @@ def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddi
     batch_variants = []
     for _ in range(n_samples):
 
+        # 첫 번째 샘플에서 얻은 z_0을, 다음 샘플들의 조건으로 재사용할 수 있는 시나리오를 염두한 코드
         if z0 is not None:
             cond_z0 = z0.clone()
             kwargs.update({"clean_cond": True})
         else:
             cond_z0 = None
+
         if ddim_sampler is not None:
 
             samples, _ = ddim_sampler.sample(S=ddim_steps,
@@ -283,7 +285,8 @@ def run_inference(args, gpu_num, gpu_no):
 
     ## prompt file setting
     assert os.path.exists(args.prompt_dir), "Error: prompt file Not Found!"
-    filename_list, data_list, prompt_list = load_data_prompts(args.prompt_dir, video_size=(args.height, args.width), video_frames=n_frames, interp=args.interp)
+    filename_list, data_list, prompt_list = load_data_prompts(args.prompt_dir, video_size=(args.height, args.width), video_frames=n_frames, interp=args.interp) # args.prompt_dir = "prompts/{version}"
+    # filename_list: 이미지 파일명 리스트, data_list: 이미지 tensor list , prompt_list: 텍스트
     num_samples = len(prompt_list)
     samples_split = num_samples // gpu_num
     print('Prompts testing [rank:%d] %d/%d samples loaded.'%(gpu_no, samples_split, num_samples))

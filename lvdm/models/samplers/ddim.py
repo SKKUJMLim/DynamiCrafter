@@ -141,10 +141,18 @@ class DDIMSampler(object):
                       **kwargs):
         device = self.model.betas.device        
         b = shape[0]
+
         if x_T is None:
-            img = torch.randn(shape, device=device)
+            img = torch.randn(shape, device=device) # x_T가 주어지지 않으면 → 랜덤 노이즈에서 시작
         else:
-            img = x_T
+            img = x_T # x_T가 주어지면 → 그 노이즈를 그대로 시작점으로 사용
+
+        # DynamiCrafter는 첫 프레임 이미지는 전혀 x_T에 들어가지 않는다.
+        # 조건(cond)으로만 사용되고 sampling 시작점은 항상 pure noise
+        # DynamiCrafter는 첫번째 프레임을 Denoising UNet의 cross-attention layer에 추가한다.
+        # TI2V-Zero나 T2V-Zero와 헷갈리지 말자
+        # DynamiCrafter의 장점은 pure noise에서 시작하기 때문에, 더 다양한 동영상을 생성할 수 있다.
+
         if precision is not None:
             if precision == 16:
                 img = img.to(dtype=torch.float16)
@@ -154,8 +162,10 @@ class DDIMSampler(object):
         elif timesteps is not None and not ddim_use_original_steps:
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
-            
+
+        # DDIM 샘플링 중간 결과를 저장하기 위한 로그 컨테이너
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
+
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
 
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
@@ -192,15 +202,17 @@ class DDIMSampler(object):
                                       unconditional_conditioning=unconditional_conditioning,
                                       mask=mask,x0=x0,fs=fs,guidance_rescale=guidance_rescale,
                                       **kwargs)
-            
 
-            img, pred_x0 = outs
+            # JEPA-SCORE energy는 x_t에 걸어야 할까, pred_x0에 걸어야 할까?
+
+            img, pred_x0 = outs # x_prev, pred_x0
+
             if callback: callback(i)
             if img_callback: img_callback(pred_x0, i)
 
             if index % log_every_t == 0 or index == total_steps - 1:
                 intermediates['x_inter'].append(img)
-                intermediates['pred_x0'].append(pred_x0)
+                intermediates['pred_x0'].append(pred_x0) # denosing step 별 latent
 
         return img, intermediates
 
@@ -209,7 +221,14 @@ class DDIMSampler(object):
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,
                       uc_type=None, conditional_guidance_scale_temporal=None,mask=None,x0=None,guidance_rescale=0.0,**kwargs):
+
+        # x: 현재 latent
+        # c: conditioning (텍스트/이미지 조건 등)
+        # t: 현재 timestep 텐서(배치 크기만큼 동일 값)
+        # index: DDIM timestep 배열에서의 인덱스
+
         b, *_, device = *x.shape, x.device
+
         if x.dim() == 5:
             is_video = True
         else:
@@ -230,7 +249,7 @@ class DDIMSampler(object):
             if guidance_rescale > 0.0:
                 model_output = rescale_noise_cfg(model_output, e_t_cond, guidance_rescale=guidance_rescale)
 
-        if self.model.parameterization == "v":
+        if self.model.parameterization == "v": #????????????
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
         else:
             e_t = model_output
@@ -257,7 +276,7 @@ class DDIMSampler(object):
 
         # current prediction for x_0
         if self.model.parameterization != "v":
-            pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
+            pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()  # 현재 denosing step에서 예측 값
         else:
             pred_x0 = self.model.predict_start_from_z_and_v(x, t, model_output)
         
@@ -269,6 +288,7 @@ class DDIMSampler(object):
 
         if quantize_denoised:
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
+
         # direction pointing to x_t
         dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
 
@@ -277,6 +297,18 @@ class DDIMSampler(object):
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
     
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+        # x_prev = (clean 성분) + (방향 성분) + (랜덤성)
+
+        # TITAN-Guide류가 주로 x_prev가 아닌 pred_x0를 수정한다
+        # pred_x0는 "모델이 생각하는 clean"이기 때문에
+
+        '''
+        x_t
+        ↓  (denoiser)
+        pred_x0
+        ↓  (energy / guidance)
+        x_prev
+        '''
 
         return x_prev, pred_x0
 

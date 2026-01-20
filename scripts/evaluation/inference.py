@@ -16,7 +16,7 @@ from lvdm.models.samplers.ddim_multiplecond import DDIMSampler as DDIMSampler_mu
 from utils.utils import instantiate_from_config
 import random
 
-from energy.jepa_score import load_vjepa2_encoder, jepa_score_exact, jepa_energy_jvp, jepa_energy_fd
+from energy.jepa_score import load_vjepa2_encoder, jepa_score_exact, jepa_energy_jvp, jepa_energy_fd, hutchinson_trace_jtj
 import torch.nn.functional as F
 
 
@@ -257,7 +257,6 @@ def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples
         batch_images = model.decode_first_stage(samples)
 
         vid = batch_images[:1]  # (1,C,T,H,W)
-        # vid = downsample_video(vid, 4, 512)
 
         print("JVP-JEPA energy calculate...")
         energy = jepa_energy_fd(
@@ -268,40 +267,16 @@ def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples
         )
         print("FD-JEPA energy:", energy.item())
 
+        with torch.enable_grad():
+            with torch.cuda.amp.autocast(enabled=False):
+                trace = hutchinson_trace_jtj(vjepa, vid, n_samples=4, noise="rademacher", pool="mean")
+                print("trace == ", trace)
+
         batch_variants.append(batch_images)
 
     ## variants, batch, c, t, h, w
     batch_variants = torch.stack(batch_variants)
     return batch_variants.permute(1, 0, 2, 3, 4, 5)
-
-
-def downsample_video(
-    vid,
-    t_keep=4,
-    hw_keep=128,
-):
-    """
-    vid: (B, C, T, H, W)
-    return: (B, C, T_small, hw_keep, hw_keep)
-    """
-    B, C, T, H, W = vid.shape
-
-    # 1) 시간 축 줄이기 (앞쪽 프레임만 사용)
-    T_small = min(T, t_keep)
-    vid = vid[:, :, :T_small].contiguous()  # (B, C, T_small, H, W)
-
-    # 2) 프레임별로 2D resize
-    #    interpolate는 (N,C,H,W) 입력을 기대하므로 reshape 필요
-    vid_ = vid.permute(0, 2, 1, 3, 4).reshape(B * T_small, C, H, W)
-    vid_ = F.interpolate(
-        vid_,
-        size=(hw_keep, hw_keep),
-        mode="bilinear",
-        align_corners=False,
-    )
-    vid = vid_.reshape(B, T_small, C, hw_keep, hw_keep).permute(0, 2, 1, 3, 4).contiguous()
-
-    return vid
 
 
 def run_inference(args, gpu_num, gpu_no):

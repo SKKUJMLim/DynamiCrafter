@@ -1,6 +1,10 @@
 import torch
 from torch.autograd.functional import jacobian
 from typing import Deque, List, Optional, Tuple, Union
+from torch.autograd.functional import jvp
+from typing import Callable, Literal, Optional
+
+
 
 '''
 # Jacobian + SVD (analysis)
@@ -111,11 +115,6 @@ def jepa_score_exact(
 
     return score
 
-
-
-import torch
-from torch.autograd.functional import jvp
-
 def jepa_energy_jvp(
     encoder_fn,
     x: torch.Tensor,
@@ -191,3 +190,84 @@ def jepa_energy_fd(
             energies.append(e)
 
     return torch.stack(energies).mean(dim=0)
+
+def _sample_rademacher_like(x: torch.Tensor) -> torch.Tensor:
+    # +/-1 with equal prob
+    return torch.empty_like(x).bernoulli_(0.5).mul_(2).sub_(1)
+
+@torch.no_grad()
+def _pool_tokens_if_needed(out: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+    # out: (B,N,D) or (B,D)
+    if out.dim() == 3:
+        if pool == "mean":
+            return out.mean(dim=1)
+        elif pool == "max":
+            return out.max(dim=1).values
+        else:
+            raise ValueError(f"Unknown pool mode: {pool}")
+    elif out.dim() == 2:
+        return out
+    else:
+        raise ValueError(f"Expected (B,N,D) or (B,D), got {out.shape}")
+
+def hutchinson_trace_jtj(
+    encoder_fn: Callable[[torch.Tensor], torch.Tensor],
+    x: torch.Tensor,
+    n_samples: int = 4,
+    noise: Literal["rademacher", "gaussian"] = "rademacher",
+    pool: str = "mean",
+    normalize_r: bool = False,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Hutchinson estimator for Tr(J^T J) = E_r[ ||J r||^2 ],
+    where J = d f(x) / d x,  f(x) is the pooled embedding (B,D).
+
+    Args:
+      encoder_fn: function mapping x -> tokens (B,N,D) or embedding (B,D)
+      x: (B,C,H,W) or (B,C,T,H,W)
+      n_samples: number of Hutchinson probe vectors
+      noise: 'rademacher' (±1) or 'gaussian' (N(0,1))
+      pool: how to pool tokens if encoder_fn outputs (B,N,D)
+      normalize_r: if True, normalize each sample's r to unit norm (NOT unbiased for trace;
+                   can reduce variance but changes the quantity)
+      eps: numerical stability for norm
+
+    Returns:
+      trace_est: (B,) tensor, per-sample estimate of Tr(J^T J)
+    """
+    if x.dim() not in (4, 5):
+        raise ValueError(f"x must be (B,C,H,W) or (B,C,T,H,W). Got {x.shape}")
+
+    # We need autograd to compute JVP through encoder_fn
+    x_req = x.detach().requires_grad_(True)
+
+    def f(inp: torch.Tensor) -> torch.Tensor:
+        out = encoder_fn(inp)                  # (B,N,D) or (B,D)
+        emb = _pool_tokens_if_needed(out, pool)  # (B,D)
+        return emb
+
+    estimates = []
+    for _ in range(n_samples):
+        if noise == "rademacher":
+            r = _sample_rademacher_like(x_req)
+        elif noise == "gaussian":
+            r = torch.randn_like(x_req)
+        else:
+            raise ValueError(f"Unknown noise: {noise}")
+
+        if normalize_r:
+            # per-sample normalization (keeps batch structure)
+            flat = r.view(r.shape[0], -1)
+            norm = flat.norm(dim=1).clamp_min(eps).view(-1, *([1] * (r.dim() - 1)))
+            r = r / norm
+
+        # JVP: returns (f(x), J r)
+        _, Jr = jvp(f, (x_req,), (r,), create_graph=False, strict=False)  # Jr: (B,D)
+
+        # ||J r||^2 per sample
+        e = (Jr ** 2).sum(dim=-1)  # (B,)
+        estimates.append(e)
+
+    trace_est = torch.stack(estimates, dim=0).mean(dim=0)  # (B,)
+    return trace_est

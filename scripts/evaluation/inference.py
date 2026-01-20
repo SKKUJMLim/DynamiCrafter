@@ -247,6 +247,7 @@ def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddi
         ## reconstruct from latent to pixel space
         batch_images = model.decode_first_stage(samples)
         batch_variants.append(batch_images)
+
     ## variants, batch, c, t, h, w
     batch_variants = torch.stack(batch_variants)
     return batch_variants.permute(1, 0, 2, 3, 4, 5)

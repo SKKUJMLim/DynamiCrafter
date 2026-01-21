@@ -256,24 +256,23 @@ def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples
         ## reconstruct from latent to pixel space
         batch_images = model.decode_first_stage(samples)
 
-        vid = batch_images[:1]  # (1,C,T,H,W)
+        # print("batch_images== ", batch_images.shape)
+        # print("JVP-JEPA energy calculate...")
+        # energy = jepa_energy_fd(
+        #     encoder_fn=vjepa,
+        #     x=batch_images.float(),
+        #     n_dir=4, # k라고 볼수 있음
+        #     eps=1e-3,
+        # )
+        # print("FD-JEPA energy:", energy.item())
 
-        print("JVP-JEPA energy calculate...")
-        energy = jepa_energy_fd(
-            encoder_fn=vjepa,
-            x=vid.float(),
-            n_dir=4, # k라고 볼수 있음
-            eps=1e-3,
-        )
-        print("FD-JEPA energy:", energy.item())
+        # with torch.enable_grad():
+        #     with torch.cuda.amp.autocast(enabled=False):
+        #         trace = hutchinson_trace_jtj(vjepa, vid, n_samples=4, noise="rademacher", pool="mean")
+        #         print("trace == ", trace)
 
-        with torch.enable_grad():
-            with torch.cuda.amp.autocast(enabled=False):
-                trace = hutchinson_trace_jtj(vjepa, vid, n_samples=4, noise="rademacher", pool="mean")
-                print("trace == ", trace)
 
         batch_variants.append(batch_images)
-
     ## variants, batch, c, t, h, w
     batch_variants = torch.stack(batch_variants)
     return batch_variants.permute(1, 0, 2, 3, 4, 5)

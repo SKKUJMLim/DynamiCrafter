@@ -271,3 +271,206 @@ def hutchinson_trace_jtj(
 
     trace_est = torch.stack(estimates, dim=0).mean(dim=0)  # (B,)
     return trace_est
+
+import torch
+from torch.autograd.functional import jvp
+from typing import Callable, Literal, Tuple
+
+# -----------------------------
+# Utility: random probe vectors
+# -----------------------------
+def _rademacher(shape, device, dtype):
+    return torch.empty(shape, device=device, dtype=dtype).bernoulli_(0.5).mul_(2).sub_(1)
+
+# ----------------------------------------
+# Pooling: encoder output -> embedding (D)
+# ----------------------------------------
+@torch.no_grad()
+def _pool_tokens_if_needed(out: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+    # out: (N,D) or (D,)
+    if out.dim() == 2:
+        if pool == "mean":
+            return out.mean(dim=0)
+        elif pool == "max":
+            return out.max(dim=0).values
+        else:
+            raise ValueError(f"Unknown pool: {pool}")
+    elif out.dim() == 1:
+        return out
+    else:
+        raise ValueError(f"Expected (N,D) or (D,), got {out.shape}")
+
+
+# ------------------------------------------------------------
+# Core: build matvec for A = J J^T in embedding space (D x D)
+# using VJP (J^T u) + JVP (J v)
+# ------------------------------------------------------------
+def _make_A_matvec_JJt(
+    encoder_fn: Callable[[torch.Tensor], torch.Tensor],
+    x_single: torch.Tensor,                   # (C,H,W) or (C,T,H,W), requires_grad will be enabled inside
+    pool: str = "mean",
+) -> Tuple[Callable[[torch.Tensor], torch.Tensor], int]:
+    """
+    Returns:
+      matvec_A(u): computes (J J^T) u in R^D
+      D: embedding dimension
+    """
+
+    # enable grad on x
+    x_req = x_single.detach().requires_grad_(True)
+
+    def f(inp: torch.Tensor) -> torch.Tensor:
+        out = encoder_fn(inp.unsqueeze(0))      # -> (1,N,D) or (1,D)
+        out = out.squeeze(0)                   # -> (N,D) or (D,)
+        emb = _pool_tokens_if_needed(out, pool)  # (D,)
+        return emb
+
+    # get D
+    with torch.no_grad():
+        D = f(x_req).numel()
+
+    def matvec_A(u: torch.Tensor) -> torch.Tensor:
+        """
+        u: (D,)
+        returns: (D,) = (J J^T) u
+        """
+        # ---- VJP: v = J^T u  (same shape as x)
+        emb = f(x_req)  # (D,)
+        # scalar = <emb, u>
+        s = torch.dot(emb, u)
+        v = torch.autograd.grad(s, x_req, retain_graph=True, create_graph=False)[0]
+
+        # ---- JVP: J v
+        # jvp returns (f(x), Jv)
+        _, Jv = jvp(f, (x_req,), (v,), create_graph=False, strict=False)  # (D,)
+        return Jv
+
+    return matvec_A, D
+
+
+# -----------------------------
+# Lanczos tridiagonalization
+# -----------------------------
+def _lanczos_tridiag(
+    matvec: Callable[[torch.Tensor], torch.Tensor],
+    q1: torch.Tensor,     # (D,) normalized
+    n_steps: int,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    Returns T (n_steps x n_steps) tridiagonal matrix from Lanczos.
+    """
+    D = q1.numel()
+    alphas = []
+    betas = []
+
+    q_prev = torch.zeros_like(q1)
+    q = q1
+
+    beta = torch.tensor(0.0, device=q.device, dtype=q.dtype)
+
+    for j in range(n_steps):
+        z = matvec(q)  # (D,)
+        alpha = torch.dot(q, z)
+        z = z - alpha * q - beta * q_prev
+
+        beta = torch.linalg.norm(z).clamp_min(eps)
+        alphas.append(alpha)
+
+        if j < n_steps - 1:
+            betas.append(beta)
+            q_prev = q
+            q = z / beta
+
+    # build T
+    T = torch.zeros((n_steps, n_steps), device=q1.device, dtype=q1.dtype)
+    for i in range(n_steps):
+        T[i, i] = alphas[i]
+        if i < n_steps - 1:
+            T[i, i + 1] = betas[i]
+            T[i + 1, i] = betas[i]
+
+    return T
+
+
+# ------------------------------------------------------------
+# SLQ estimator for Tr(log(A + eps I)), A = JJ^T
+# and return JEPA-SCORE = 0.5 * Tr(log(A + eps I))
+# with torch.enable_grad():
+#     with torch.cuda.amp.autocast(enabled=False):
+#         score = jepa_score_slq(
+#             encoder_fn=vjepa,
+#             x=vid.float(),      # (B,C,T,H,W)
+#             n_probe=8,
+#             n_lanczos=20,
+#             noise="rademacher",
+#             pool="mean",
+#             log_eps=1e-6,
+#         )
+# print("JEPA-SCORE (SLQ) =", score)
+# ------------------------------------------------------------
+def jepa_score_slq(
+    encoder_fn: Callable[[torch.Tensor], torch.Tensor],
+    x: torch.Tensor,  # (B,C,H,W) or (B,C,T,H,W)
+    n_probe: int = 8,
+    n_lanczos: int = 20,
+    noise: Literal["rademacher", "gaussian"] = "rademacher",
+    pool: str = "mean",
+    log_eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Approximates JEPA-SCORE (Eq. 5): sum log sigma_k(J)
+    using SLQ on A = J J^T (embedding space).
+
+    Returns:
+      score: (B,)  (approx) 0.5 * Tr(log(JJ^T + log_eps I))
+    """
+    if x.dim() not in (4, 5):
+        raise ValueError(f"x must be (B,C,H,W) or (B,C,T,H,W). Got {x.shape}")
+
+    B = x.shape[0]
+    device = x.device
+    dtype = x.dtype
+
+    scores = []
+
+    for b in range(B):
+        x_single = x[b]  # (C,...) single sample
+
+        matvec_A, D = _make_A_matvec_JJt(encoder_fn, x_single, pool=pool)
+
+        # SLQ estimate of Tr(log(A + eps I)) = E_g [ g^T log(A+epsI) g ]
+        # with probes g ~ N(0,I) or Rademacher
+        ests = []
+        for _ in range(n_probe):
+            if noise == "rademacher":
+                g = _rademacher((D,), device=device, dtype=dtype)
+            elif noise == "gaussian":
+                g = torch.randn((D,), device=device, dtype=dtype)
+            else:
+                raise ValueError(f"Unknown noise: {noise}")
+
+            g_norm = torch.linalg.norm(g).clamp_min(1e-12)
+            q1 = g / g_norm  # normalized starting vector
+
+            # Lanczos on A
+            T = _lanczos_tridiag(matvec_A, q1, n_steps=n_lanczos)
+
+            # Gauss quadrature: g^T f(A) g ≈ ||g||^2 * e1^T f(T) e1
+            # where e1=[1,0,...]
+            evals, evecs = torch.linalg.eigh(T)  # T is symmetric tridiagonal
+            # weights = (first component of eigenvectors)^2
+            w = (evecs[0, :] ** 2)
+
+            # f(λ)=log(λ+log_eps); add jitter for numerical stability
+            f_evals = torch.log(evals.clamp_min(0.0) + log_eps)
+
+            quad = (g_norm ** 2) * torch.sum(w * f_evals)  # scalar
+            ests.append(quad)
+
+        tr_log = torch.stack(ests).mean()  # scalar ≈ Tr(log(A+epsI))
+
+        # JEPA-SCORE = 0.5 * Tr(log(JJ^T + eps I))  (since log σ = 0.5 log σ^2)
+        scores.append(0.5 * tr_log)
+
+    return torch.stack(scores, dim=0)  # (B,)

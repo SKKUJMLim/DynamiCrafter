@@ -41,7 +41,7 @@ def get_filelist(data_dir, postfixes):
         pattern = os.path.join(data_dir, f"*.{postfix}")
         file_list.extend(glob.glob(pattern))
 
-    # ✅ 중복 제거 (Windows에서 *.png와 *.PNG 중복 매칭 방지)
+    # 중복 제거 (Windows에서 *.png와 *.PNG 중복 매칭 방지)
     uniq = {}
     for p in file_list:
         key = os.path.abspath(p).lower()
@@ -108,9 +108,9 @@ def load_data_prompts(data_dir, video_size=(256,256), video_frames=16, interp=Fa
     file_list = get_filelist(data_dir, ['jpg', 'png', 'jpeg', 'JPEG', 'PNG'])
     # assert len(file_list) == n_samples, "Error: data and prompts are NOT paired!"
 
-    print("file_list (raw):")
-    for p in file_list:
-        print(" ", os.path.basename(p))
+    # print("file_list (raw):")
+    # for p in file_list:
+    #     print(" ", os.path.basename(p))
 
     data_list = []
     filename_list = []
@@ -258,7 +258,6 @@ def get_latent_z(model, videos):
     return z
 
 
-
 def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
                         unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False, multiple_cond_cfg=False, loop=False, interp=False, timestep_spacing='uniform', guidance_rescale=0.0, jepa_cfg=None, **kwargs):
     ddim_sampler = DDIMSampler(model) if not multiple_cond_cfg else DDIMSampler_multicond(model)
@@ -396,7 +395,7 @@ def run_inference(args, gpu_num, gpu_no):
     vjepa = load_vjepa2_encoder(device="cuda")
 
     jepa_cfg = dict(
-        enable=False,       # guide
+        enable=True,       # guide
         anomaly_fd=False,  # anomaly만 켬
 
         # enable, anomaly_fd   결과

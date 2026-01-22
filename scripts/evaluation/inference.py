@@ -26,13 +26,30 @@ torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
 
+# def get_filelist(data_dir, postfixes):
+#     patterns = [os.path.join(data_dir, f"*.{postfix}") for postfix in postfixes]
+#     file_list = []
+#     for pattern in patterns:
+#         file_list.extend(glob.glob(pattern))
+#     file_list.sort()
+#     return file_list
+
+# 종민 수정
 def get_filelist(data_dir, postfixes):
-    patterns = [os.path.join(data_dir, f"*.{postfix}") for postfix in postfixes]
     file_list = []
-    for pattern in patterns:
+    for postfix in postfixes:
+        pattern = os.path.join(data_dir, f"*.{postfix}")
         file_list.extend(glob.glob(pattern))
-    file_list.sort()
-    return file_list
+
+    # ✅ 중복 제거 (Windows에서 *.png와 *.PNG 중복 매칭 방지)
+    uniq = {}
+    for p in file_list:
+        key = os.path.abspath(p).lower()
+        uniq[key] = p
+
+    return sorted(uniq.values())
+
+
 
 def load_model_checkpoint(model, ckpt):
     state_dict = torch.load(ckpt, map_location="cpu")
@@ -90,6 +107,11 @@ def load_data_prompts(data_dir, video_size=(256,256), video_frames=16, interp=Fa
     ## load video
     file_list = get_filelist(data_dir, ['jpg', 'png', 'jpeg', 'JPEG', 'PNG'])
     # assert len(file_list) == n_samples, "Error: data and prompts are NOT paired!"
+
+    print("file_list (raw):")
+    for p in file_list:
+        print(" ", os.path.basename(p))
+
     data_list = []
     filename_list = []
     prompt_list = load_prompts(prompt_file[default_idx])
@@ -416,6 +438,12 @@ def run_inference(args, gpu_num, gpu_no):
             prompts = prompt_list_rank[indice:indice+args.bs]
             videos = data_list_rank[indice:indice+args.bs]
             filenames = filename_list_rank[indice:indice+args.bs]
+
+            print(f"\n[BATCH {idx}] start_i={indice}")
+            print(f"[BATCH {idx}] filenames={filenames}")
+            print(f"[BATCH {idx}] prompts={prompts}")
+
+
             if isinstance(videos, list):
                 videos = torch.stack(videos, dim=0).to("cuda")
             else:
@@ -429,6 +457,7 @@ def run_inference(args, gpu_num, gpu_no):
                 ## samples : [n_samples,c,t,h,w]
                 prompt = prompts[nn]
                 filename = filenames[nn]
+
                 # save_results(prompt, samples, filename, fakedir, fps=8, loop=args.loop)
                 # save_results_seperate(prompt, samples, filename, fakedir, fps=8, loop=args.loop)           # 비디오 저장
                 save_frames_separate(prompt, samples, filename, fakedir, start_idx=0, normalize_mode="auto") # 프레임 저장

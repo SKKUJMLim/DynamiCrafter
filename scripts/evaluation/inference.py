@@ -86,7 +86,7 @@ def load_data_prompts(data_dir, video_size=(256,256), video_frames=16, interp=Fa
     if len(prompt_file) > 1:
         print(f"Warning: multiple prompt files exist. The one {os.path.split(prompt_file[default_idx])[1]} is used.")
     ## only use the first one (sorted by name) if multiple exist
-    
+
     ## load video
     file_list = get_filelist(data_dir, ['jpg', 'png', 'jpeg', 'JPEG', 'PNG'])
     # assert len(file_list) == n_samples, "Error: data and prompts are NOT paired!"
@@ -112,7 +112,7 @@ def load_data_prompts(data_dir, video_size=(256,256), video_frames=16, interp=Fa
 
         data_list.append(frame_tensor)
         filename_list.append(filename)
-        
+
     return filename_list, data_list, prompt_list
 
 
@@ -133,7 +133,7 @@ def save_results(prompt, samples, filename, fakedir, fps=8, loop=False):
         video = video.permute(2, 0, 1, 3, 4) # t,n,c,h,w
         if loop:
             video = video[:-1,...]
-        
+
         frame_grids = [torchvision.utils.make_grid(framesheet, nrow=int(n), padding=0) for framesheet in video] #[3, 1*h, n*w]
         grid = torch.stack(frame_grids, dim=0) # stack in temporal dim [t, 3, h, n*w]
         grid = (grid + 1.0) / 2.0
@@ -164,6 +164,70 @@ def save_results_seperate(prompt, samples, filename, fakedir, fps=10, loop=False
             path = os.path.join(savedirs[idx].replace('samples', 'samples_separate'), f'{filename.split(".")[0]}_sample{i}.mp4')
             torchvision.io.write_video(path, grid, fps=fps, video_codec='h264', options={'crf': '10'})
 
+
+import os
+from PIL import Image
+import torch
+
+def save_frames_separate(prompt, samples, filename, outdir, start_idx=0, normalize_mode="auto"):
+    """
+    samples: Tensor [n_samples, C, T, H, W]
+      - 보통 값 범위가 [-1,1] 또는 [0,1]
+    저장 구조:
+      outdir/filename/
+        sample_000/frame_000.png ...
+        sample_001/frame_000.png ...
+    """
+    os.makedirs(outdir, exist_ok=True)
+    save_root = os.path.join(outdir, filename)
+    os.makedirs(save_root, exist_ok=True)
+
+    if not torch.is_tensor(samples):
+        raise TypeError(f"samples must be torch.Tensor, got {type(samples)}")
+
+    if samples.dim() != 5:
+        raise ValueError(f"Expected samples shape [n_samples,C,T,H,W], got {tuple(samples.shape)}")
+
+    n, C, T, H, W = samples.shape
+    if C != 3:
+        raise ValueError(f"Expected C=3 (RGB). Got C={C}. Shape={tuple(samples.shape)}")
+
+    # (선택) prompt도 같이 저장하고 싶으면 텍스트 파일로 저장
+    # with open(os.path.join(save_root, "prompt.txt"), "w", encoding="utf-8") as f:
+    #     f.write(str(prompt))
+
+    # CPU로 옮기기 (I/O 최적화 + 안전)
+    x = samples.detach().cpu()
+
+    # normalize: auto / minus1_1 / zero1
+    # auto: min<0이면 [-1,1]로 보고 변환, 아니면 [0,1]로 간주
+    if normalize_mode == "auto":
+        vmin = float(x.min())
+        if vmin < 0.0:
+            x = (x.clamp(-1, 1) + 1) / 2.0
+        else:
+            x = x.clamp(0, 1)
+    elif normalize_mode == "minus1_1":
+        x = (x.clamp(-1, 1) + 1) / 2.0
+    elif normalize_mode == "zero1":
+        x = x.clamp(0, 1)
+    else:
+        raise ValueError(f"Unknown normalize_mode: {normalize_mode}")
+
+    # uint8 변환
+    x = (x * 255.0).round().to(torch.uint8)  # [n,3,T,H,W]
+
+    for si in range(n):
+        sample_dir = os.path.join(save_root, f"sample_{si:03d}")
+        os.makedirs(sample_dir, exist_ok=True)
+
+        for ti in range(T):
+            frame = x[si, :, ti]                 # [3,H,W]
+            frame = frame.permute(1, 2, 0)       # [H,W,3]
+            img = Image.fromarray(frame.numpy())
+            img.save(os.path.join(sample_dir, f"frame_{start_idx + ti:03d}.png"))
+
+
 def get_latent_z(model, videos):
     b, c, t, h, w = videos.shape
     x = rearrange(videos, 'b c t h w -> (b t) c h w')
@@ -172,8 +236,9 @@ def get_latent_z(model, videos):
     return z
 
 
-def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
-                        unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False, multiple_cond_cfg=False, loop=False, interp=False, timestep_spacing='uniform', guidance_rescale=0.0, **kwargs):
+
+def image_guided_synthesis(model, prompts, videos, noise_shape, n_samples=1, ddim_steps=50, ddim_eta=1., \
+                        unconditional_guidance_scale=1.0, cfg_img=None, fs=None, text_input=False, multiple_cond_cfg=False, loop=False, interp=False, timestep_spacing='uniform', guidance_rescale=0.0, jepa_cfg=None, **kwargs):
     ddim_sampler = DDIMSampler(model) if not multiple_cond_cfg else DDIMSampler_multicond(model)
     batch_size = noise_shape[0]
     fs = torch.tensor([fs] * batch_size, dtype=torch.long, device=model.device)
@@ -197,7 +262,7 @@ def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples
             img_cat_cond = z[:,:,:1,:,:]
             img_cat_cond = repeat(img_cat_cond, 'b c t h w -> b c (repeat t) h w', repeat=z.shape[2])
         cond["c_concat"] = [img_cat_cond] # b c 1 h w
-    
+
     if unconditional_guidance_scale != 1.0:
         if model.uncond_type == "empty_seq":
             prompts = batch_size * [""]
@@ -244,34 +309,18 @@ def image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, n_samples
                                             unconditional_guidance_scale=unconditional_guidance_scale,
                                             unconditional_conditioning=uc,
                                             eta=ddim_eta,
-                                            cfg_img=cfg_img, 
+                                            cfg_img=cfg_img,
                                             mask=cond_mask,
                                             x0=cond_z0,
                                             fs=fs,
                                             timestep_spacing=timestep_spacing,
                                             guidance_rescale=guidance_rescale,
+                                            jepa_cfg=jepa_cfg,
                                             **kwargs
                                             )
 
         ## reconstruct from latent to pixel space
         batch_images = model.decode_first_stage(samples)
-
-        # print("batch_images== ", batch_images.shape)
-        # print("JVP-JEPA energy calculate...")
-        # energy = jepa_energy_fd(
-        #     encoder_fn=vjepa,
-        #     x=batch_images.float(),
-        #     n_dir=4, # k라고 볼수 있음
-        #     eps=1e-3,
-        # )
-        # print("FD-JEPA energy:", energy.item())
-
-        # with torch.enable_grad():
-        #     with torch.cuda.amp.autocast(enabled=False):
-        #         trace = hutchinson_trace_jtj(vjepa, vid, n_samples=4, noise="rademacher", pool="mean")
-        #         print("trace == ", trace)
-
-
         batch_variants.append(batch_images)
     ## variants, batch, c, t, h, w
     batch_variants = torch.stack(batch_variants)
@@ -282,7 +331,7 @@ def run_inference(args, gpu_num, gpu_no):
     ## model config
     config = OmegaConf.load(args.config)
     model_config = config.pop("model", OmegaConf.create())
-    
+
     ## set use_checkpoint as False as when using deepspeed, it encounters an error "deepspeed backend not set"
     model_config['params']['unet_config']['params']['use_checkpoint'] = False
     model = instantiate_from_config(model_config)
@@ -324,6 +373,43 @@ def run_inference(args, gpu_num, gpu_no):
 
     vjepa = load_vjepa2_encoder(device="cuda")
 
+    jepa_cfg = dict(
+        enable=False,       # guide
+        anomaly_fd=False,  # anomaly만 켬
+
+        # enable, anomaly_fd   결과
+        # False   False        완전 baseline
+        # False   True         anomaly만 계산
+        # True    False        guide만
+        # True    True         guide + anomaly
+
+        encoder_fn=vjepa,
+        preprocess=None,
+
+        t_start_ratio=0.7,
+        t_end_ratio=1.0,
+        every_k=4,
+        # 1 매 denoising step마다 가이드
+        # 2 step에 1번
+        # 4 step에 1번
+        # 8 step에 1번
+
+        use_fp32=True,
+
+        frame_stride=1,
+        max_frames=16,
+
+        v_mode="score", # score or random
+        lambda_=0.05,  # guide strength
+        fd_eps=1e-3,
+
+        ##### GPT 추천코드
+        # v_mode="random"
+        # lambda_ = 0.1
+        # every_k = 1
+        # t_start_ratio = 0.9
+    )
+
     start = time.time()
     with torch.no_grad(), torch.cuda.amp.autocast():
         for idx, indice in tqdm(enumerate(range(0, len(prompt_list_rank), args.bs)), desc='Sample Batch'):
@@ -335,8 +421,8 @@ def run_inference(args, gpu_num, gpu_no):
             else:
                 videos = videos.unsqueeze(0).to("cuda")
 
-            batch_samples = image_guided_synthesis(vjepa, model, prompts, videos, noise_shape, args.n_samples, args.ddim_steps, args.ddim_eta, \
-                                args.unconditional_guidance_scale, args.cfg_img, args.frame_stride, args.text_input, args.multiple_cond_cfg, args.loop, args.interp, args.timestep_spacing, args.guidance_rescale)
+            batch_samples = image_guided_synthesis(model, prompts, videos, noise_shape, args.n_samples, args.ddim_steps, args.ddim_eta, \
+                                args.unconditional_guidance_scale, args.cfg_img, args.frame_stride, args.text_input, args.multiple_cond_cfg, args.loop, args.interp, args.timestep_spacing, args.guidance_rescale, jepa_cfg=jepa_cfg)
 
             ## save each example individually
             for nn, samples in enumerate(batch_samples):
@@ -344,7 +430,8 @@ def run_inference(args, gpu_num, gpu_no):
                 prompt = prompts[nn]
                 filename = filenames[nn]
                 # save_results(prompt, samples, filename, fakedir, fps=8, loop=args.loop)
-                save_results_seperate(prompt, samples, filename, fakedir, fps=8, loop=args.loop)
+                # save_results_seperate(prompt, samples, filename, fakedir, fps=8, loop=args.loop)           # 비디오 저장
+                save_frames_separate(prompt, samples, filename, fakedir, start_idx=0, normalize_mode="auto") # 프레임 저장
 
     print(f"Saved in {args.savedir}. Time used: {(time.time() - start):.2f} seconds")
 

@@ -25,19 +25,6 @@ def load_vjepa2_encoder(
     Returns encoder in eval() mode.
     """
 
-    # # ---------------- V-JEPA2 (HF) load ----------------
-    # processor = torch.hub.load("facebookresearch/vjepa2", "vjepa2_preprocessor")
-    # loaded = torch.hub.load("facebookresearch/vjepa2", "vjepa2_vit_giant")
-    #
-    # if isinstance(loaded, tuple):
-    #     vjepa2_encoder = loaded[0]  # encoder만 사용
-    # else:
-    #     vjepa2_encoder = loaded
-    #
-    # vjepa2_encoder = vjepa2_encoder.to(t2v_pipeline.model.device).eval()
-    # # ---------------------------------------------------
-
-
     loaded = torch.hub.load(repo, model_name)
 
     if isinstance(loaded, tuple):

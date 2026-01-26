@@ -2,8 +2,7 @@ import torch
 from torch.autograd.functional import jacobian
 from typing import Deque, List, Optional, Tuple, Union
 from torch.autograd.functional import jvp
-from typing import Callable, Literal, Optional
-
+from typing import Callable, Literal, Tuple
 
 
 '''
@@ -12,8 +11,6 @@ x = x.to(device) # x: (B,C,H,W) or (B,C,T,H,W)
 score = jepa_score_exact(encoder, x, eps=1e-6, pool="mean")
 print(score.shape, score)
 '''
-
-
 @torch.no_grad()
 def load_vjepa2_encoder(
     device: Union[str, torch.device],
@@ -50,6 +47,73 @@ def _pool_tokens(out: torch.Tensor, mode: str = "mean") -> torch.Tensor:
         return out.max(dim=1).values
     else:
         raise ValueError(f"Unknown pool mode: {mode}")
+
+
+# ----------------------------------------
+# Pooling: encoder output -> embedding (D)
+# ----------------------------------------
+# @torch.no_grad()
+# def _pool_tokens_if_needed(out: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+#     # out: (N,D) or (D,)
+#     if out.dim() == 2:
+#         if pool == "mean":
+#             return out.mean(dim=0)
+#         elif pool == "max":
+#             return out.max(dim=0).values
+#         else:
+#             raise ValueError(f"Unknown pool: {pool}")
+#     elif out.dim() == 1:
+#         return out
+#     else:
+#         raise ValueError(f"Expected (N,D) or (D,), got {out.shape}")
+@torch.no_grad()
+def _pool_tokens_if_needed(out: torch.Tensor, pool: str = "mean") -> torch.Tensor:
+    """
+    Convert encoder output to (B, D).
+
+    Supported shapes:
+      - (B, D)
+      - (D,)
+      - (B, N, D)  : token sequence
+      - (B, D, N)  : token sequence (rare; supported)
+    """
+    if not torch.is_tensor(out):
+        raise ValueError(f"Expected torch.Tensor, got {type(out)}")
+
+    # (D,) -> (1,D)
+    if out.dim() == 1:
+        return out.unsqueeze(0)
+
+    # (B,D) ok
+    if out.dim() == 2:
+        return out
+
+    # (B,N,D) or (B,D,N)
+    if out.dim() == 3:
+        B, A, C = out.shape
+
+        if pool in ["mean", "avg"]:
+            # Heuristic: assume last dim is embedding dim (D) when it's not huge token count.
+            # In your case [1, 2048, 1408] => treat as (B,N,D) and pool over N.
+            # If it is actually (B,D,N), this still works if you switch to pool="mean_tokens_last".
+            return out.mean(dim=1)
+
+        elif pool in ["mean_last", "mean_tokens_last"]:
+            # If output is (B,D,N), pool over last dim
+            return out.mean(dim=2)
+
+        elif pool in ["first", "cls"]:
+            # take first token: (B,D) if (B,N,D)
+            return out[:, 0, :]
+
+        elif pool in ["last"]:
+            # take last token: (B,D) if (B,N,D)
+            return out[:, -1, :]
+
+        else:
+            raise ValueError(f"Unknown pool='{pool}'. Use mean/mean_last/cls/last.")
+
+    raise ValueError(f"Expected (B,D) or (D,) or (B,N,D)/(B,D,N), got {out.shape}")
 
 def jepa_score_exact(
     encoder,
@@ -182,20 +246,6 @@ def _sample_rademacher_like(x: torch.Tensor) -> torch.Tensor:
     # +/-1 with equal prob
     return torch.empty_like(x).bernoulli_(0.5).mul_(2).sub_(1)
 
-@torch.no_grad()
-def _pool_tokens_if_needed(out: torch.Tensor, pool: str = "mean") -> torch.Tensor:
-    # out: (B,N,D) or (B,D)
-    if out.dim() == 3:
-        if pool == "mean":
-            return out.mean(dim=1)
-        elif pool == "max":
-            return out.max(dim=1).values
-        else:
-            raise ValueError(f"Unknown pool mode: {pool}")
-    elif out.dim() == 2:
-        return out
-    else:
-        raise ValueError(f"Expected (B,N,D) or (B,D), got {out.shape}")
 
 def hutchinson_trace_jtj(
     encoder_fn: Callable[[torch.Tensor], torch.Tensor],
@@ -232,6 +282,9 @@ def hutchinson_trace_jtj(
     def f(inp: torch.Tensor) -> torch.Tensor:
         out = encoder_fn(inp)                  # (B,N,D) or (B,D)
         emb = _pool_tokens_if_needed(out, pool)  # (B,D)
+
+        print("encoder out shape:", out.shape)
+
         return emb
 
     estimates = []
@@ -259,33 +312,12 @@ def hutchinson_trace_jtj(
     trace_est = torch.stack(estimates, dim=0).mean(dim=0)  # (B,)
     return trace_est
 
-import torch
-from torch.autograd.functional import jvp
-from typing import Callable, Literal, Tuple
-
 # -----------------------------
 # Utility: random probe vectors
 # -----------------------------
 def _rademacher(shape, device, dtype):
     return torch.empty(shape, device=device, dtype=dtype).bernoulli_(0.5).mul_(2).sub_(1)
 
-# ----------------------------------------
-# Pooling: encoder output -> embedding (D)
-# ----------------------------------------
-@torch.no_grad()
-def _pool_tokens_if_needed(out: torch.Tensor, pool: str = "mean") -> torch.Tensor:
-    # out: (N,D) or (D,)
-    if out.dim() == 2:
-        if pool == "mean":
-            return out.mean(dim=0)
-        elif pool == "max":
-            return out.max(dim=0).values
-        else:
-            raise ValueError(f"Unknown pool: {pool}")
-    elif out.dim() == 1:
-        return out
-    else:
-        raise ValueError(f"Expected (N,D) or (D,), got {out.shape}")
 
 
 # ------------------------------------------------------------

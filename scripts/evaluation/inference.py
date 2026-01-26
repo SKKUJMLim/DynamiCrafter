@@ -11,19 +11,21 @@ import torchvision.transforms as transforms
 from pytorch_lightning import seed_everything
 from PIL import Image
 sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
-from lvdm.models.samplers.ddim import DDIMSampler
+
+# from lvdm.models.samplers.ddim import DDIMSampler
+from lvdm.models.samplers.ddim_hutch import DDIMSampler
+
 from lvdm.models.samplers.ddim_multiplecond import DDIMSampler as DDIMSampler_multicond
 from utils.utils import instantiate_from_config
 import random
+import os
 
 from energy.jepa_score import load_vjepa2_encoder, jepa_score_exact, jepa_energy_jvp, jepa_energy_fd, hutchinson_trace_jtj
 import torch.nn.functional as F
-
-
 # jepa_energy_jvp를 위한 Attention kernel 비활성화
-torch.backends.cuda.enable_flash_sdp(False)
-torch.backends.cuda.enable_mem_efficient_sdp(False)
-torch.backends.cuda.enable_math_sdp(True)
+# torch.backends.cuda.enable_flash_sdp(False)
+# torch.backends.cuda.enable_mem_efficient_sdp(False)
+# torch.backends.cuda.enable_math_sdp(True)
 
 
 # def get_filelist(data_dir, postfixes):
@@ -185,11 +187,6 @@ def save_results_seperate(prompt, samples, filename, fakedir, fps=10, loop=False
             grid = (grid * 255).to(torch.uint8).permute(1, 2, 3, 0) #thwc
             path = os.path.join(savedirs[idx].replace('samples', 'samples_separate'), f'{filename.split(".")[0]}_sample{i}.mp4')
             torchvision.io.write_video(path, grid, fps=fps, video_codec='h264', options={'crf': '10'})
-
-
-import os
-from PIL import Image
-import torch
 
 def save_frames_separate(prompt, samples, filename, outdir, start_idx=0, normalize_mode="auto"):
     """
@@ -392,43 +389,76 @@ def run_inference(args, gpu_num, gpu_no):
     data_list_rank = [data_list[i] for i in indices]
     filename_list_rank = [filename_list[i] for i in indices]
 
+    # VJEPA를 불러오는 코드
     vjepa = load_vjepa2_encoder(device="cuda")
 
+    # -----------------------
+    # JEPA Forward-Difference Anomaly Score (no update)
+    # 상단 코드를 from lvdm.models.samplers.ddimimport DDIMSampler으로 바꿔줘야 함
+    # -----------------------
+    # jepa_cfg = dict(
+    #     enable=True,       # guide
+    #     anomaly_fd=False,  # anomaly만 켬
+    #
+    #     # enable, anomaly_fd   결과
+    #     # False   False        완전 baseline
+    #     # False   True         anomaly만 계산
+    #     # True    False        guide만
+    #     # True    True         guide + anomaly
+    #
+    #     encoder_fn=vjepa,
+    #     preprocess=None,
+    #
+    #     t_start_ratio=0.7,
+    #     t_end_ratio=1.0,
+    #     every_k=1,
+    #     # 1 매 denoising step마다 가이드
+    #     # 2 step에 1번
+    #     # 4 step에 1번
+    #     # 8 step에 1번
+    #
+    #     use_fp32=True,
+    #
+    #     frame_stride=1,
+    #     max_frames=16,
+    #
+    #     v_mode="random", # score or random
+    #     lambda_=0.05,  # guide strength
+    #     fd_eps=1e-3,
+    #
+    #     ##### GPT 추천코드
+    #     # v_mode="random"
+    #     # lambda_ = 0.1
+    #     # every_k = 1
+    #     # t_start_ratio = 0.9
+    # )
+
+    # -----------------------
+    # JEPA Hutchinson Guidance
+    # 상단 코드를 from lvdm.models.samplers.ddim_hutch import DDIMSampler으로 바꿔줘야 함
+    # -----------------------
     jepa_cfg = dict(
-        enable=True,       # guide
-        anomaly_fd=False,  # anomaly만 켬
-
-        # enable, anomaly_fd   결과
-        # False   False        완전 baseline
-        # False   True         anomaly만 계산
-        # True    False        guide만
-        # True    True         guide + anomaly
-
+        enable=True,
+        energy_type="hutchinson",
         encoder_fn=vjepa,
-        preprocess=None,
+
+        hutch_n_samples=4,
+        hutch_noise="rademacher",
+        hutch_normalize_r=False,
+        hutch_seed=1234,
+        hutch_pool="mean",  # 추가
 
         t_start_ratio=0.7,
         t_end_ratio=1.0,
         every_k=4,
-        # 1 매 denoising step마다 가이드
-        # 2 step에 1번
-        # 4 step에 1번
-        # 8 step에 1번
 
         use_fp32=True,
-
         frame_stride=1,
         max_frames=16,
 
-        v_mode="score", # score or random
-        lambda_=0.05,  # guide strength
+        v_mode="score",
+        lambda_=0.05,
         fd_eps=1e-3,
-
-        ##### GPT 추천코드
-        # v_mode="random"
-        # lambda_ = 0.1
-        # every_k = 1
-        # t_start_ratio = 0.9
     )
 
     start = time.time()

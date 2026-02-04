@@ -9,6 +9,11 @@ from lvdm.common import extract_into_tensor
 from contextlib import nullcontext
 from energy.jepa_score import hutchinson_trace_jtj
 
+import energy.jepa_score as js
+print("[jepa_score file]", js.__file__, flush=True)
+print("[hutch code file]", hutchinson_trace_jtj.__code__.co_filename, flush=True)
+
+
 
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
@@ -631,6 +636,9 @@ class DDIMSampler(object):
 
         # IMPORTANT: hutchinson_trace_jtj uses autograd JVP internally.
         # We are in @torch.no_grad() context overall, so re-enable grad locally.
+
+        # print("hutchinson_trace_jtj =================")
+
         with torch.enable_grad():
             E = hutchinson_trace_jtj(
                 encoder_fn=enc,

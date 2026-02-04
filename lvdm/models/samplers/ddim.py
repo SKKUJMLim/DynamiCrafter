@@ -300,7 +300,7 @@ class DDIMSampler(object):
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
 
         # -----------------------
-        # JEPA Forward-Difference Guidance (TITAN-Guide style)
+        # JEPA Forward-Difference Guidance
         # -----------------------
         jepa_cfg = kwargs.get("jepa_cfg", None)
         if jepa_cfg is not None:
@@ -580,7 +580,7 @@ class DDIMSampler(object):
         return: (B,) per-sample energy
         """
 
-        print("_compute_jepa_energy start")
+        # print("_compute_jepa_energy start")
 
         # decode latent -> pixel/video
         x_pix = self.model.decode_first_stage(pred_x0)  # (B,3,T,H,W) usually in [-1,1]

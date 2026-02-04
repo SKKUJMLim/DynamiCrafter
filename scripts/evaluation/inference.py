@@ -13,7 +13,8 @@ from PIL import Image
 sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
 
 # from lvdm.models.samplers.ddim import DDIMSampler
-from lvdm.models.samplers.ddim_hutch import DDIMSampler
+# from lvdm.models.samplers.ddim_hutch import DDIMSampler
+from lvdm.models.samplers.ddim_hutch_predx0_version import DDIMSampler
 
 from lvdm.models.samplers.ddim_multiplecond import DDIMSampler as DDIMSampler_multicond
 from utils.utils import instantiate_from_config
@@ -21,10 +22,6 @@ import random
 import os
 
 from energy.jepa_score import load_vjepa2_encoder
-# jepa_energy_jvp를 위한 Attention kernel 비활성화
-# torch.backends.cuda.enable_flash_sdp(False)
-# torch.backends.cuda.enable_mem_efficient_sdp(False)
-# torch.backends.cuda.enable_math_sdp(True)
 
 
 # def get_filelist(data_dir, postfixes):
@@ -408,28 +405,22 @@ def run_inference(args, gpu_num, gpu_no):
     #     encoder_fn=vjepa,
     #     preprocess=None,
     #
-    #     t_start_ratio=0.7,
+    #     t_start_ratio=0.85,  # late only
     #     t_end_ratio=1.0,
-    #     every_k=1,
-    #     # 1 매 denoising step마다 가이드
-    #     # 2 step에 1번
-    #     # 4 step에 1번
-    #     # 8 step에 1번
+    #     every_k=8,  # 매우 드물게
     #
     #     use_fp32=True,
     #
-    #     frame_stride=1,
-    #     max_frames=16,
+    #     frame_stride=2,  # 프레임 확 줄이기
+    #     max_frames=8,
     #
-    #     v_mode="random", # score or random
-    #     lambda_=0.05,  # guide strength
+    #     v_mode="random",
+    #     lambda_=0.01,  # 약하게 시작
     #     fd_eps=1e-3,
     #
-    #     ##### GPT 추천코드
-    #     # v_mode="random"
-    #     # lambda_ = 0.1
-    #     # every_k = 1
-    #     # t_start_ratio = 0.9
+    #     # (중요) energy FD 안에서 n_dir 줄이기
+    #     energy_n_dir=1,  # ddim.py의 _default_jepa_cfg에 있음
+    #     energy_eps=1e-3,
     # )
 
     # -----------------------
@@ -437,7 +428,7 @@ def run_inference(args, gpu_num, gpu_no):
     # 상단 코드를 from lvdm.models.samplers.ddim_hutch import DDIMSampler으로 바꿔줘야 함
     # -----------------------
     jepa_cfg = dict(
-        enable=True,
+        enable=False,
         energy_type="hutchinson",
         encoder_fn=vjepa,
 
@@ -447,15 +438,16 @@ def run_inference(args, gpu_num, gpu_no):
         hutch_normalize_r=False,
         hutch_seed=1234,
         hutch_pool="mean_tokens_last",
+
         t_start_ratio=0.7,
         t_end_ratio=1.0,
         every_k=4,
 
         use_fp32=True,
-        frame_stride=1,
-        max_frames=16,
+        frame_stride=2,
+        max_frames=8,
 
-        v_mode="score",
+        v_mode="score", # # score or random
         lambda_=0.05,
         fd_eps=1e-3,
     )

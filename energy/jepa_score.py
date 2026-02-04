@@ -283,7 +283,7 @@ def hutchinson_trace_jtj(
         out = encoder_fn(inp)                  # (B,N,D) or (B,D)
         emb = _pool_tokens_if_needed(out, pool)  # (B,D)
 
-        print("encoder out shape:", out.shape)
+        # print("encoder out shape:", out.shape)
 
         return emb
 

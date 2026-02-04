@@ -225,44 +225,6 @@ class DDIMSampler(object):
 
         return img, intermediates
 
-
-    ################################################ 추가 ###########################################
-    @torch.no_grad()
-    def _rollout_to_0(self, x_t, cond, index,
-                      unconditional_guidance_scale=1.0,
-                      unconditional_conditioning=None,
-                      use_original_steps=False,
-                      rollout_k=None):
-        """
-        If rollout_k is None: full rollout from index -> 0 (inclusive).
-        If rollout_k is int K: truncated rollout for K steps, i.e., index -> max(index-K, 0).
-        Returns the partially/fully denoised latent.
-        """
-        # compute end index (inclusive)
-        if rollout_k is None:
-            j_stop = 0
-        else:
-            K = int(rollout_k)
-            if K <= 0:
-                return x_t  # no rollout
-            j_stop = max(index - K + 1, 0)
-
-        z = x_t
-        for j in range(index, j_stop - 1, -1):  # inclusive down to j_stop
-            step = (j if use_original_steps else self.ddim_timesteps[j])
-            ts = torch.full((z.shape[0],), int(step), device=z.device, dtype=torch.long)
-
-            z, _ = self.p_sample_ddim(
-                z, cond, ts, index=j,
-                use_original_steps=use_original_steps,
-                unconditional_guidance_scale=unconditional_guidance_scale,
-                unconditional_conditioning=unconditional_conditioning,
-                jepa_cfg=None,  # must disable during rollout
-            )
-        return z
-    ################################################################################################
-
-
     @torch.no_grad()
     def p_sample_ddim(self, x, c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
@@ -371,173 +333,145 @@ class DDIMSampler(object):
                     f"in_window={in_window}, do_step={do_step}"
                 )
 
-                # 1) choose direction V in x-space
+                # 방향 V 선택: score(e_t) 또는 random
                 v_mode = jepa_cfg.get("v_mode", "score")
                 if v_mode == "score":
-                    V = e_t.detach()  # same shape as x
+                    V = e_t.detach()
                 else:
-                    V = torch.randn_like(x)
+                    V = torch.randn_like(pred_x0)
 
+                # per-sample normalize (안 하면 스케일에 종속됨)
                 if jepa_cfg.get("normalize_v", True):
                     v_flat = V.reshape(V.shape[0], -1)
-                    v_norm = v_flat.norm(dim=1).clamp_min(1e-8).reshape(-1, *([1] * (V.dim() - 1)))
+                    v_norm = v_flat.norm(dim=1).clamp_min(1e-8).reshape(
+                        -1, *([1] * (V.dim() - 1))
+                    )
                     V = V / v_norm
 
                 fd_eps = float(jepa_cfg.get("fd_eps", 1e-3))
                 maximize = bool(jepa_cfg.get("maximize", True))
-                ########### 추가 ###########
+
+                # lambda schedule inside window
                 frac = (progress - t0) / max(t1 - t0, 1e-8)  # 0..1
                 lam_t = self._jepa_lambda_t(jepa_cfg, frac)
 
+                # fp32로 energy 계산(권장)
                 use_fp32 = bool(jepa_cfg.get("use_fp32", True))
                 amp_ctx = torch.cuda.amp.autocast(enabled=False) if use_fp32 else nullcontext()
 
                 with amp_ctx:
+
+                    # Fix Hutchinson probes across E0/E1 within this denoising step
                     base_seed = int(jepa_cfg.get("hutch_seed", 1234))
                     step_seed = base_seed + int(index)
+                    torch.manual_seed(step_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(step_seed)
+                    E0 = self._compute_jepa_energy(pred_x0, jepa_cfg)  # (B,)
+                    pred_pert = pred_x0 + fd_eps * V
 
-                    def _seed_hutch():
-                        torch.manual_seed(step_seed)
-                        if torch.cuda.is_available():
-                            torch.cuda.manual_seed_all(step_seed)
+                    # Fix Hutchinson probes across E0/E1 within this denoising step
+                    base_seed = int(jepa_cfg.get("hutch_seed", 1234))
+                    step_seed = base_seed + int(index)
+                    torch.manual_seed(step_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(step_seed)
+                    E1 = self._compute_jepa_energy(pred_pert, jepa_cfg)  # (B,)
 
-                    rollout_k = jepa_cfg.get("rollout_k", None)
-
-                    # E0: evaluate on \hat{Z}_{0|t} = Sample_{t->0}(x)
-                    zhat0 = self._rollout_to_0(
-                        x, c, index,
-                        unconditional_guidance_scale=unconditional_guidance_scale,
-                        unconditional_conditioning=unconditional_conditioning,
-                        use_original_steps=use_original_steps,
-                        rollout_k=rollout_k,
-                    )
-                    _seed_hutch()
-                    E0 = self._compute_jepa_energy(zhat0, jepa_cfg)
-
-                    # E1: evaluate on \hat{Z}_{0|t} from the perturbed latent
-                    x_pert = x + fd_eps * V
-                    zhat0_pert = self._rollout_to_0(
-                        x_pert, c, index,
-                        unconditional_guidance_scale=unconditional_guidance_scale,
-                        unconditional_conditioning=unconditional_conditioning,
-                        use_original_steps=use_original_steps,
-                        rollout_k=rollout_k,
-                    )
-                    _seed_hutch()
-                    E1 = self._compute_jepa_energy(zhat0_pert, jepa_cfg)
-
-                    # update target: x (Z_t)
+                    # maximize energy: loss = -E, minimize: loss = +E
                     L0 = -E0 if maximize else E0
                     L1 = -E1 if maximize else E1
-                    delta = (L1 - L0) / max(fd_eps, 1e-12)
+
+                    # directional grad estimate along V:
+                    # g ≈ ((L1 - L0)/eps) * V   (broadcast per-sample scalar)
+                    delta = (L1 - L0) / max(fd_eps, 1e-12)  # (B,)
                     delta = delta.reshape(-1, *([1] * (V.dim() - 1)))
                     g = delta * V
-                    x = (x - lam_t * g).type_as(x)
 
-                # --- recompute after updating x (TITAN-style) ---
-                if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-                    model_output = self.model.apply_model(x, t, c, **kwargs)
-                else:
-                    e_t_cond = self.model.apply_model(x, t, c, **kwargs)
-                    e_t_uncond = self.model.apply_model(x, t, unconditional_conditioning, **kwargs)
-                    model_output = e_t_uncond + unconditional_guidance_scale * (e_t_cond - e_t_uncond)
-                    if guidance_rescale > 0.0:
-                        model_output = rescale_noise_cfg(model_output, e_t_cond, guidance_rescale=guidance_rescale)
-
-                if self.model.parameterization == "v":
-                    e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
-                else:
-                    e_t = model_output
-
-                if self.model.parameterization != "v":
-                    pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-                else:
-                    pred_x0 = self.model.predict_start_from_z_and_v(x, t, model_output)
-
-                if self.model.use_dynamic_rescale:
-                    pred_x0 *= (prev_scale_t / scale_t)
+                # pred_x0 수정
+                pred_x0 = (pred_x0 - lam_t * g).type_as(pred_x0)
 
         # -----------------------
         # JEPA Forward-Difference Anomaly Score (no update)
         # -----------------------
-        # if jepa_cfg is not None and jepa_cfg.get("anomaly_fd", False):
-        #     assert "encoder_fn" in jepa_cfg and jepa_cfg["encoder_fn"] is not None, \
-        #         "jepa_cfg['encoder_fn'] must be provided (e.g., V-JEPA2 encoder callable)."
-        #
-        #     total_steps = len(self.ddim_timesteps) if not use_original_steps else self.ddpm_num_timesteps
-        #     progress = 1.0 - (index / max(total_steps - 1, 1))
-        #
-        #     t0 = float(jepa_cfg.get("t_start_ratio", 0.0))
-        #     t1 = float(jepa_cfg.get("t_end_ratio", 1.0))
-        #     in_window = (progress >= t0) and (progress <= t1)
-        #
-        #     every_k = int(jepa_cfg.get("every_k", 1))
-        #     do_step = (every_k <= 1) or ((index % every_k) == 0)
-        #
-        #     anomaly_val = None
-        #     if in_window and do_step:
-        #         # how many probe directions (RMS)
-        #         # (backward compat: allow n_dir to specify this as well)
-        #         K = int(jepa_cfg.get("anomaly_n_dir", jepa_cfg.get("n_dir", 1)))
-        #         fd_eps = float(jepa_cfg.get("fd_eps", 1e-3))
-        #
-        #         # baseline energy (B,)
-        #         use_fp32 = bool(jepa_cfg.get("use_fp32", True))
-        #         amp_ctx = torch.cuda.amp.autocast(enabled=False) if use_fp32 else nullcontext()
-        #
-        #         with amp_ctx:
-        #
-        #             # Fix Hutchinson probes across E0/E1 within this denoising step
-        #             base_seed = int(jepa_cfg.get("hutch_seed", 1234))
-        #             step_seed = base_seed + int(index)
-        #             torch.manual_seed(step_seed)
-        #             if torch.cuda.is_available():
-        #                 torch.cuda.manual_seed_all(step_seed)
-        #             E0 = self._compute_jepa_energy(pred_x0, jepa_cfg)  # (B,)
-        #
-        #             deltas = []
-        #             v_mode = jepa_cfg.get("v_mode", "score")
-        #             for _ in range(max(K, 1)):
-        #                 if v_mode == "score":
-        #                     V = e_t.detach()
-        #                 else:
-        #                     V = torch.randn_like(pred_x0)
-        #
-        #                 if jepa_cfg.get("normalize_v", True):
-        #                     v_flat = V.reshape(V.shape[0], -1)
-        #                     v_norm = v_flat.norm(dim=1).clamp_min(1e-8).reshape(
-        #                         -1, *([1] * (V.dim() - 1))
-        #                     )
-        #                     V = V / v_norm
-        #
-        #                 pred_pert = pred_x0 + fd_eps * V
-        #
-        #                 # Fix Hutchinson probes across E0/E1 within this denoising step
-        #                 base_seed = int(jepa_cfg.get("hutch_seed", 1234))
-        #                 step_seed = base_seed + int(index)
-        #                 torch.manual_seed(step_seed)
-        #                 if torch.cuda.is_available():
-        #                     torch.cuda.manual_seed_all(step_seed)
-        #                 E1 = self._compute_jepa_energy(pred_pert, jepa_cfg)  # (B,)
-        #                 deltas.append((E1 - E0) / max(fd_eps, 1e-12))  # (B,)
-        #
-        #             # RMS over directions -> (B,)
-        #             delta = torch.stack(deltas, dim=0)  # (K,B)
-        #             anomaly_val = torch.sqrt((delta ** 2).mean(dim=0))
-        #
-        #     # log
-        #     try:
-        #         if getattr(self, "_jepa_anomaly_fd_log", None) is not None:
-        #             self._jepa_anomaly_fd_log.append({
-        #                 "index": int(index),
-        #                 "t": int(t[0].item()) if isinstance(t, torch.Tensor) else int(t),
-        #                 "progress": float(progress),
-        #                 "in_window": bool(in_window),
-        #                 "do_step": bool(do_step),
-        #                 "anomaly": None if anomaly_val is None else anomaly_val.detach().float().cpu(),
-        #             })
-        #     except Exception:
-        #         pass
+        if jepa_cfg is not None and jepa_cfg.get("anomaly_fd", False):
+            assert "encoder_fn" in jepa_cfg and jepa_cfg["encoder_fn"] is not None, \
+                "jepa_cfg['encoder_fn'] must be provided (e.g., V-JEPA2 encoder callable)."
+
+            total_steps = len(self.ddim_timesteps) if not use_original_steps else self.ddpm_num_timesteps
+            progress = 1.0 - (index / max(total_steps - 1, 1))
+
+            t0 = float(jepa_cfg.get("t_start_ratio", 0.0))
+            t1 = float(jepa_cfg.get("t_end_ratio", 1.0))
+            in_window = (progress >= t0) and (progress <= t1)
+
+            every_k = int(jepa_cfg.get("every_k", 1))
+            do_step = (every_k <= 1) or ((index % every_k) == 0)
+
+            anomaly_val = None
+            if in_window and do_step:
+                # how many probe directions (RMS)
+                # (backward compat: allow n_dir to specify this as well)
+                K = int(jepa_cfg.get("anomaly_n_dir", jepa_cfg.get("n_dir", 1)))
+                fd_eps = float(jepa_cfg.get("fd_eps", 1e-3))
+
+                # baseline energy (B,)
+                use_fp32 = bool(jepa_cfg.get("use_fp32", True))
+                amp_ctx = torch.cuda.amp.autocast(enabled=False) if use_fp32 else nullcontext()
+
+                with amp_ctx:
+
+                    # Fix Hutchinson probes across E0/E1 within this denoising step
+                    base_seed = int(jepa_cfg.get("hutch_seed", 1234))
+                    step_seed = base_seed + int(index)
+                    torch.manual_seed(step_seed)
+                    if torch.cuda.is_available():
+                        torch.cuda.manual_seed_all(step_seed)
+                    E0 = self._compute_jepa_energy(pred_x0, jepa_cfg)  # (B,)
+
+                    deltas = []
+                    v_mode = jepa_cfg.get("v_mode", "score")
+                    for _ in range(max(K, 1)):
+                        if v_mode == "score":
+                            V = e_t.detach()
+                        else:
+                            V = torch.randn_like(pred_x0)
+
+                        if jepa_cfg.get("normalize_v", True):
+                            v_flat = V.reshape(V.shape[0], -1)
+                            v_norm = v_flat.norm(dim=1).clamp_min(1e-8).reshape(
+                                -1, *([1] * (V.dim() - 1))
+                            )
+                            V = V / v_norm
+
+                        pred_pert = pred_x0 + fd_eps * V
+
+                        # Fix Hutchinson probes across E0/E1 within this denoising step
+                        base_seed = int(jepa_cfg.get("hutch_seed", 1234))
+                        step_seed = base_seed + int(index)
+                        torch.manual_seed(step_seed)
+                        if torch.cuda.is_available():
+                            torch.cuda.manual_seed_all(step_seed)
+                        E1 = self._compute_jepa_energy(pred_pert, jepa_cfg)  # (B,)
+                        deltas.append((E1 - E0) / max(fd_eps, 1e-12))  # (B,)
+
+                    # RMS over directions -> (B,)
+                    delta = torch.stack(deltas, dim=0)  # (K,B)
+                    anomaly_val = torch.sqrt((delta ** 2).mean(dim=0))
+
+            # log
+            try:
+                if getattr(self, "_jepa_anomaly_fd_log", None) is not None:
+                    self._jepa_anomaly_fd_log.append({
+                        "index": int(index),
+                        "t": int(t[0].item()) if isinstance(t, torch.Tensor) else int(t),
+                        "progress": float(progress),
+                        "in_window": bool(in_window),
+                        "do_step": bool(do_step),
+                        "anomaly": None if anomaly_val is None else anomaly_val.detach().float().cpu(),
+                    })
+            except Exception:
+                pass
 
         # direction pointing to x_t
         dir_xt = (1. - a_prev - sigma_t ** 2).sqrt() * e_t
@@ -548,6 +482,17 @@ class DDIMSampler(object):
 
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
         # x_prev = (clean 성분) + (방향 성분) + (랜덤성)
+
+        # TITAN-Guide류가 주로 x_prev가 아닌 pred_x0를 수정한다
+        # pred_x0는 "모델이 생각하는 clean"이기 때문에
+
+        '''
+        x_t
+        ↓  (denoiser)
+        pred_x0
+        ↓  (energy / guidance)
+        x_prev
+        '''
 
         return x_prev, pred_x0
 

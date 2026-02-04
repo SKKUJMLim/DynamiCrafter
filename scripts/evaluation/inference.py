@@ -441,12 +441,12 @@ def run_inference(args, gpu_num, gpu_no):
         energy_type="hutchinson",
         encoder_fn=vjepa,
 
+        rollout_k=5,  # None이면 full rollout
         hutch_n_samples=4,
-        hutch_noise="rademacher",
+        hutch_noise="rademacher", # rademacher or gaussian
         hutch_normalize_r=False,
         hutch_seed=1234,
-        hutch_pool="mean",  # 추가
-
+        hutch_pool="mean_tokens_last",
         t_start_ratio=0.7,
         t_end_ratio=1.0,
         every_k=4,

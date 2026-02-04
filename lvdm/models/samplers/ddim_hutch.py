@@ -4,7 +4,6 @@ import torch
 from lvdm.models.utils_diffusion import make_ddim_sampling_parameters, make_ddim_timesteps, rescale_noise_cfg
 from lvdm.common import noise_like
 from lvdm.common import extract_into_tensor
-import copy
 
 # --- JEPA guidance (Hutchinson energy) ---
 from contextlib import nullcontext

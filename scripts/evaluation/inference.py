@@ -20,8 +20,7 @@ from utils.utils import instantiate_from_config
 import random
 import os
 
-from energy.jepa_score import load_vjepa2_encoder, jepa_score_exact, jepa_energy_jvp, jepa_energy_fd, hutchinson_trace_jtj
-import torch.nn.functional as F
+from energy.jepa_score import load_vjepa2_encoder
 # jepa_energy_jvp를 위한 Attention kernel 비활성화
 # torch.backends.cuda.enable_flash_sdp(False)
 # torch.backends.cuda.enable_mem_efficient_sdp(False)

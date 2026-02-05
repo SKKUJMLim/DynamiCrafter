@@ -594,14 +594,14 @@ class DDIMSampler(object):
         eps = float(cfg.get("energy_eps", 1e-3))
 
         # jepa_energy_fd returns (B,)
-        # E = jepa_energy_fd(enc, x_in, n_dir=n_dir, eps=eps)
+        E = jepa_energy_fd(enc, x_in, n_dir=n_dir, eps=eps)
 
-        E, e_t, w = jepa_energy_fd_softmax_frames(
-            enc, x_in,
-            n_dir=n_dir, eps=eps,
-            tokens_per_frame=cfg.get("tokens_per_frame"),
-            has_cls=cfg.get("has_cls"),
-            beta=cfg.get("frame_beta", 5.0),
-        )
+        # E, e_t, w = jepa_energy_fd_softmax_frames(
+        #     enc, x_in,
+        #     n_dir=n_dir, eps=eps,
+        #     tokens_per_frame=cfg.get("tokens_per_frame"),
+        #     has_cls=cfg.get("has_cls"),
+        #     beta=cfg.get("frame_beta", 5.0),
+        # )
 
         return E

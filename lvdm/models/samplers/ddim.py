@@ -7,7 +7,7 @@ from lvdm.common import extract_into_tensor
 
 # --- JEPA guidance ---
 from contextlib import nullcontext
-from energy.jepa_score import jepa_energy_fd
+from energy.jepa_score import jepa_energy_fd, jepa_energy_fd_softmax_frames
 
 
 class DDIMSampler(object):
@@ -594,6 +594,14 @@ class DDIMSampler(object):
         eps = float(cfg.get("energy_eps", 1e-3))
 
         # jepa_energy_fd returns (B,)
-        E = jepa_energy_fd(enc, x_in, n_dir=n_dir, eps=eps)
-        return E
+        # E = jepa_energy_fd(enc, x_in, n_dir=n_dir, eps=eps)
 
+        E, e_t, w = jepa_energy_fd_softmax_frames(
+            enc, x_in,
+            n_dir=n_dir, eps=eps,
+            tokens_per_frame=cfg.get("tokens_per_frame"),
+            has_cls=cfg.get("has_cls"),
+            beta=cfg.get("frame_beta", 5.0),
+        )
+
+        return E

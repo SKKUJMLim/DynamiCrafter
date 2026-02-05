@@ -413,19 +413,24 @@ def run_inference(args, gpu_num, gpu_no):
 
         t_start_ratio=0.5,
         t_end_ratio=1.0,
-        every_k=1,  # 매우 드물게
+        every_k=4,
 
         use_fp32=True,
 
-        frame_stride=1,
-        max_frames=16,
+        frame_stride=2,
+        max_frames=8,
 
-        v_mode="random",
-        lambda_=0.1,  # 약하게 시작
+        normalize_v=True,
+        maximize=False, ######### 뭐지?
+        lambda_schedule="linear",
+        frame_beta=5.0,
+
+        v_mode="score", # score or random
+        lambda_=0.01,
         fd_eps=1e-3,
 
         # (중요) energy FD 안에서 n_dir 줄이기
-        energy_n_dir=1,  # ddim.py의 _default_jepa_cfg에 있음
+        energy_n_dir=4, # ??????
         energy_eps=1e-3,
     )
 
@@ -447,14 +452,14 @@ def run_inference(args, gpu_num, gpu_no):
     #
     #     t_start_ratio=0.5,
     #     t_end_ratio=1.0,
-    #     every_k=1,
+    #     every_k=4,
     #
     #     use_fp32=True,
-    #     frame_stride=1,
-    #     max_frames=16,
+    #     frame_stride=2,
+    #     max_frames=8,
     #
-    #     v_mode="score", # # score or random
-    #     lambda_=0.1,
+    #     v_mode="score", # score or random
+    #     lambda_=0.01,
     #     fd_eps=1e-3,
     # )
 

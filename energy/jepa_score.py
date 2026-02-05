@@ -215,6 +215,30 @@ def jepa_energy_fd(encoder_fn, x, n_dir=2, eps=1e-3):
     B = x.shape[0]
     energies = []
 
+    # with torch.no_grad():
+    #     f0 = encoder_fn(x)
+    #     print("[JEPA] x:", tuple(x.shape), "f0:", tuple(f0.shape), "dtype:", x.dtype, flush=True)
+    #
+    #     if f0.dim() == 3 and x.dim() == 5:
+    #         B, N, D = f0.shape
+    #         Tprime = x.shape[2]
+    #         print(f"[JEPA] B={B} N={N} D={D} T'={Tprime}  N%T'={N % Tprime}  (N-1)%T'={(N - 1) % Tprime}", flush=True)
+    #         if N % Tprime == 0:
+    #             S = N // Tprime
+    #             print(f"[JEPA] likely tokens per frame S={S} (N=T'*S)", flush=True)
+    #         elif (N - 1) % Tprime == 0:
+    #             S = (N - 1) // Tprime
+    #             print(f"[JEPA] likely CLS + tokens per frame S={S} (N=1+T'*S)", flush=True)
+    #
+    # 출력 값
+    # [JEPA] x: (1, 3, 8, 256, 256) f0: (1, 1024, 1408) dtype: torch.float32
+    # [JEPA] B=1 N=1024 D=1408 T'=8  N%T'=0  (N-1)%T'=7
+    # [JEPA] likely tokens per frame S=128 (N=T'*S)
+    # 프레임당 토큰 수: S = 128
+    # 프레임별 임베딩 차원: D = 1408
+    # CLS 토큰 없음
+    # VJEPA는 시간 축을 유지한 상태로 토큰을 평탄화(flatten) 해서 반환
+
     with torch.no_grad():
         f0 = encoder_fn(x)
         if f0.dim() == 3:
@@ -234,9 +258,138 @@ def jepa_energy_fd(encoder_fn, x, n_dir=2, eps=1e-3):
 
             Jv = (f1 - f0) / eps
             e = (Jv ** 2).mean(dim=-1)
+            # e = (Jr ** 2).sum(dim=-1)  # (B,)
             energies.append(e)
 
     return torch.stack(energies).mean(dim=0)
+
+
+@torch.no_grad()
+def jepa_energy_fd_softmax_frames(
+    encoder_fn,
+    x,                      # (B,3,T',H,W)
+    n_dir=2,
+    eps=1e-3,
+    tokens_per_frame=None,
+    has_cls=None,
+    beta=5.0,               # softmax sharpness
+):
+    B, _, Tprime, _, _ = x.shape
+
+    out0 = encoder_fn(x)  # (B,N,D)
+    if out0.dim() != 3:
+        raise ValueError(f"Expected (B,N,D), got {out0.shape}")
+    _, N0, D0 = out0.shape
+
+    # infer CLS
+    if has_cls is None:
+        if N0 % Tprime == 0:
+            has_cls = False
+        elif (N0 - 1) % Tprime == 0:
+            has_cls = True
+        else:
+            raise ValueError(f"Cannot infer token layout: N={N0}, T'={Tprime}")
+
+    # infer tokens_per_frame
+    if tokens_per_frame is None:
+        tokens_per_frame = (N0 - 1)//Tprime if has_cls else N0//Tprime
+
+    def to_frame_emb(out):  # out: (B,N,D) -> (B,T',D)
+        out_tok = out[:, 1:, :] if has_cls else out
+        out_tok = out_tok.view(B, Tprime, tokens_per_frame, D0)
+        return out_tok.mean(dim=2)
+
+    emb0 = to_frame_emb(out0)  # (B,T',D)
+
+    energies_t = []
+    for _ in range(n_dir):
+        v = torch.randn_like(x)
+        v = v / (
+            v.flatten(1).norm(dim=1, keepdim=True)
+             .view(B, *([1] * (x.dim() - 1)))
+             .clamp_min(1e-6)
+        )
+
+        out1 = encoder_fn(x + eps * v)
+        emb1 = to_frame_emb(out1)  # (B,T',D)
+
+        Jv_t = (emb1 - emb0) / eps
+        e_t = (Jv_t ** 2).mean(dim=-1)  # (B,T')
+        energies_t.append(e_t)
+
+    e_t = torch.stack(energies_t, dim=0).mean(dim=0)  # (B,T')
+    w = torch.softmax(beta * e_t, dim=1)              # (B,T')
+    E = (w * e_t).sum(dim=1)                          # (B,)
+    return E, e_t, w
+
+
+@torch.no_grad()
+def jepa_energy_fd_frame_max(
+    encoder_fn,
+    x: torch.Tensor,      # (B,3,T',H,W)
+    n_dir: int = 4,
+    eps: float = 1e-3,
+    tokens_per_frame: int | None = None,
+    has_cls: bool | None = None,   # None이면 자동 추정
+):
+    B, C, Tprime, H, W = x.shape
+    out0 = encoder_fn(x)  # (B,N,D)
+    if out0.dim() != 3:
+        raise ValueError(f"Expected (B,N,D), got {out0.shape}")
+    B0, N0, D0 = out0.shape
+
+    # --- infer CLS + S ---
+    if has_cls is None:
+        if N0 % Tprime == 0:
+            has_cls = False
+        elif (N0 - 1) % Tprime == 0:
+            has_cls = True
+        else:
+            raise ValueError(f"Cannot infer token layout: N={N0}, T'={Tprime}")
+
+    if tokens_per_frame is None:
+        tokens_per_frame = (N0 - 1)//Tprime if has_cls else N0//Tprime
+
+    # --- drop CLS if present ---
+    if has_cls:
+        out0_tok = out0[:, 1:, :]
+    else:
+        out0_tok = out0
+
+    if out0_tok.shape[1] != Tprime * tokens_per_frame:
+        raise ValueError(
+            f"Token count mismatch after CLS handling: "
+            f"{out0_tok.shape[1]} != T'({Tprime})*S({tokens_per_frame})"
+        )
+
+    out0_tok = out0_tok.view(B0, Tprime, tokens_per_frame, D0)
+    emb0_t = out0_tok.mean(dim=2)  # (B,T',D)
+
+    energies_t = []
+    for _ in range(n_dir):
+        v = torch.randn_like(x)
+        v = v / (
+            v.flatten(1).norm(dim=1, keepdim=True)
+             .view(B, *([1] * (x.dim() - 1)))
+             .clamp_min(1e-6)
+        )
+
+        out1 = encoder_fn(x + eps * v)
+        if out1.dim() != 3:
+            raise ValueError(f"Expected (B,N,D), got {out1.shape}")
+
+        out1_tok = out1[:, 1:, :] if has_cls else out1
+        out1_tok = out1_tok.view(B0, Tprime, tokens_per_frame, D0)
+        emb1_t = out1_tok.mean(dim=2)
+
+        Jv_t = (emb1_t - emb0_t) / eps
+        e_t = (Jv_t ** 2).mean(dim=-1)  # (B,T')
+        energies_t.append(e_t)
+
+    E_t = torch.stack(energies_t, dim=0).mean(dim=0)   # (B,T')
+    return E_t.max(dim=1).values, E_t.argmax(dim=1)
+
+
 
 
 @torch.no_grad()

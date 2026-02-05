@@ -383,6 +383,12 @@ class DDIMSampler(object):
                     L0 = -E0 if maximize else E0
                     L1 = -E1 if maximize else E1
 
+                    print(
+                        "E0 mean/std:", E0.mean().item(), E0.std().item(),
+                        "E1 mean/std:", E1.mean().item(), E1.std().item(),
+                        "deltaE:", (E1 - E0).abs().mean().item()
+                    )
+
                     # directional grad estimate along V:
                     # g ≈ ((L1 - L0)/eps) * V   (broadcast per-sample scalar)
                     delta = (L1 - L0) / max(fd_eps, 1e-12)  # (B,)
@@ -390,7 +396,16 @@ class DDIMSampler(object):
                     g = delta * V
 
                 # pred_x0 수정
+                # pred_x0_old = pred_x0.detach().clone()
+
                 pred_x0 = (pred_x0 - lam_t * g).type_as(pred_x0)
+
+                # pred_x0_new = pred_x0.detach()  # 또는 clone()
+
+                # dx = (pred_x0_new - pred_x0_old).float()
+                # print("||Δpred_x0||_mean", dx.abs().mean().item(),
+                #       "||Δpred_x0||_max", dx.abs().max().item(),
+                #       flush=True)
 
         # -----------------------
         # JEPA Forward-Difference Anomaly Score (no update)

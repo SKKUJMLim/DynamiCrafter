@@ -14,7 +14,7 @@ sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
 
 from lvdm.models.samplers.ddim import DDIMSampler
 # from lvdm.models.samplers.ddim_hutch import DDIMSampler
-from lvdm.models.samplers.ddim_hutch_predx0_version import DDIMSampler
+# from lvdm.models.samplers.ddim_hutch_predx0_version import DDIMSampler
 
 from lvdm.models.samplers.ddim_multiplecond import DDIMSampler as DDIMSampler_multicond
 from utils.utils import instantiate_from_config
@@ -398,65 +398,65 @@ def run_inference(args, gpu_num, gpu_no):
     # JEPA Forward-Difference Anomaly Score (no update)
     # 상단 코드를 from lvdm.models.samplers.ddimimport DDIMSampler으로 바꿔줘야 함
     # -----------------------
-    # jepa_cfg = dict(
-    #     enable=True,       # guide
-    #     anomaly_fd=False,  # anomaly만 켬
-    #
-    #     # enable, anomaly_fd   결과
-    #     # False   False        완전 baseline
-    #     # False   True         anomaly만 계산
-    #     # True    False        guide만
-    #     # True    True         guide + anomaly
-    #
-    #     encoder_fn=vjepa,
-    #     preprocess=None,
-    #
-    #     t_start_ratio=0.85,  # late only
-    #     t_end_ratio=1.0,
-    #     every_k=4,  # 매우 드물게
-    #
-    #     use_fp32=True,
-    #
-    #     frame_stride=2,
-    #     max_frames=8,
-    #
-    #     v_mode="random",
-    #     lambda_=0.01,  # 약하게 시작
-    #     fd_eps=1e-3,
-    #
-    #     # (중요) energy FD 안에서 n_dir 줄이기
-    #     energy_n_dir=1,  # ddim.py의 _default_jepa_cfg에 있음
-    #     energy_eps=1e-3,
-    # )
+    jepa_cfg = dict(
+        enable=True,       # guide
+        anomaly_fd=False,  # anomaly만 켬
+
+        # enable, anomaly_fd   결과
+        # False   False        완전 baseline
+        # False   True         anomaly만 계산
+        # True    False        guide만
+        # True    True         guide + anomaly
+
+        encoder_fn=vjepa,
+        preprocess=None,
+
+        t_start_ratio=0.5,
+        t_end_ratio=1.0,
+        every_k=1,  # 매우 드물게
+
+        use_fp32=True,
+
+        frame_stride=1,
+        max_frames=16,
+
+        v_mode="random",
+        lambda_=0.1,  # 약하게 시작
+        fd_eps=1e-3,
+
+        # (중요) energy FD 안에서 n_dir 줄이기
+        energy_n_dir=1,  # ddim.py의 _default_jepa_cfg에 있음
+        energy_eps=1e-3,
+    )
 
     # -----------------------
     # JEPA Hutchinson Guidance
     # 상단 코드를 from lvdm.models.samplers.ddim_hutch import DDIMSampler으로 바꿔줘야 함
     # -----------------------
-    jepa_cfg = dict(
-        enable=True,
-        energy_type="hutchinson",
-        encoder_fn=vjepa,
-
-        rollout_k=5,  # None이면 full rollout
-        hutch_n_samples=4,
-        hutch_noise="rademacher", # rademacher or gaussian
-        hutch_normalize_r=True,
-        hutch_seed=1234,
-        hutch_pool="mean",
-
-        t_start_ratio=0.7,
-        t_end_ratio=1.0,
-        every_k=4,
-
-        use_fp32=True,
-        frame_stride=2,
-        max_frames=8,
-
-        v_mode="score", # # score or random
-        lambda_=0.01,
-        fd_eps=1e-3,
-    )
+    # jepa_cfg = dict(
+    #     enable=True,
+    #     energy_type="hutchinson",
+    #     encoder_fn=vjepa,
+    #
+    #     rollout_k=5,  # None이면 full rollout
+    #     hutch_n_samples=4,
+    #     hutch_noise="rademacher", # rademacher or gaussian
+    #     hutch_normalize_r=True,
+    #     hutch_seed=1234,
+    #     hutch_pool="mean",
+    #
+    #     t_start_ratio=0.5,
+    #     t_end_ratio=1.0,
+    #     every_k=1,
+    #
+    #     use_fp32=True,
+    #     frame_stride=1,
+    #     max_frames=16,
+    #
+    #     v_mode="score", # # score or random
+    #     lambda_=0.1,
+    #     fd_eps=1e-3,
+    # )
 
     start = time.time()
     with torch.no_grad(), torch.cuda.amp.autocast():

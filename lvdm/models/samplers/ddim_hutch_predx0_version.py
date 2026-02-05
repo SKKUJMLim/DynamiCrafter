@@ -7,14 +7,8 @@ from lvdm.common import extract_into_tensor
 
 # --- JEPA guidance (Hutchinson energy) ---
 from contextlib import nullcontext
-from energy.jepa_score import hutchinson_trace_jtj
-
-import energy.jepa_score as js
-print("[jepa_score file]", js.__file__, flush=True)
-print("[hutch code file]", js.hutchinson_trace_jtj.__code__.co_filename, flush=True)
-import energy
-print("[energy package dir]", energy.__path__, flush=True)
-
+# from energy.jepa_score import hutchinson_trace_jtj
+from energy.jepa_score import fd_hutchinson_trace_jtj
 
 
 class DDIMSampler(object):
@@ -635,19 +629,19 @@ class DDIMSampler(object):
         noise = cfg.get("hutch_noise", "rademacher")
         pool = cfg.get("hutch_pool", "mean")
         normalize_r = bool(cfg.get("hutch_normalize_r", False))
+        fd_eps = float(cfg.get("fd_eps", 1e-3))
 
         # IMPORTANT: hutchinson_trace_jtj uses autograd JVP internally.
         # We are in @torch.no_grad() context overall, so re-enable grad locally.
 
-        # print("hutchinson_trace_jtj =================")
-
         with torch.enable_grad():
-            E = hutchinson_trace_jtj(
+            E = fd_hutchinson_trace_jtj(
                 encoder_fn=enc,
                 x=x_in,
                 n_samples=n_samples,
                 noise=noise,
                 pool=pool,
                 normalize_r=normalize_r,
+                eps_fd=fd_eps,
             )  # (B,)
         return E

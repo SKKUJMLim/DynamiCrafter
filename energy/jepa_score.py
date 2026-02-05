@@ -210,7 +210,7 @@ def jepa_energy_jvp(
 def jepa_energy_fd(encoder_fn, x, n_dir=2, eps=1e-3):
 
 
-    print("=======jepa_energy_fd=======")
+    print("[HUTCH] jepa_energy_fd CALLED", flush=True)
 
     B = x.shape[0]
     energies = []
@@ -237,6 +237,58 @@ def jepa_energy_fd(encoder_fn, x, n_dir=2, eps=1e-3):
             energies.append(e)
 
     return torch.stack(energies).mean(dim=0)
+
+
+@torch.no_grad()
+def fd_hutchinson_trace_jtj(
+    encoder_fn,
+    x: torch.Tensor,
+    n_samples: int = 4,
+    noise: str = "rademacher",   # <-- 추가
+    pool: str = "mean",
+    normalize_r: bool = False,
+    eps: float = 1e-8,           # <-- 호환용(정규화 안정성)
+    eps_fd: float = 1e-3,        # <-- FD step
+) -> torch.Tensor:
+    """
+    FD-Hutchinson estimator for Tr(J^T J)
+    Jr ≈ (f(x + eps_fd * r) - f(x)) / eps_fd
+    """
+
+    print("[HUTCH] fd_hutchinson_trace_jtj CALLED", flush=True)
+
+    def f(inp):
+        out = encoder_fn(inp)
+        emb = _pool_tokens_if_needed(out, pool)  # (B,D)
+        return emb
+
+    f0 = f(x)  # (B,D)
+    estimates = []
+
+    for _ in range(n_samples):
+        if noise == "rademacher":
+            r = _sample_rademacher_like(x)
+        elif noise == "gaussian":
+            r = torch.randn_like(x)
+        else:
+            raise ValueError(f"Unknown noise: {noise}")
+
+        if normalize_r:
+            r = r / (
+                r.flatten(1).norm(dim=1, keepdim=True)
+                .view(x.shape[0], *([1] * (x.dim() - 1)))
+                .clamp_min(eps)
+            )
+
+        f1 = f(x + eps_fd * r)
+        Jr = (f1 - f0) / eps_fd  # (B,D)
+        # e = (Jr ** 2).sum(dim=-1)  # (B,)
+        e = (Jr ** 2).mean(-1)
+        estimates.append(e)
+
+    return torch.stack(estimates, dim=0).mean(dim=0)
+
+
 
 
 def _sample_rademacher_like(x: torch.Tensor) -> torch.Tensor:

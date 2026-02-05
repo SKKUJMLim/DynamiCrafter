@@ -12,7 +12,7 @@ from pytorch_lightning import seed_everything
 from PIL import Image
 sys.path.insert(1, os.path.join(sys.path[0], '..', '..'))
 
-# from lvdm.models.samplers.ddim import DDIMSampler
+from lvdm.models.samplers.ddim import DDIMSampler
 # from lvdm.models.samplers.ddim_hutch import DDIMSampler
 from lvdm.models.samplers.ddim_hutch_predx0_version import DDIMSampler
 
@@ -22,6 +22,12 @@ import random
 import os
 
 from energy.jepa_score import load_vjepa2_encoder
+
+
+# torch.backends.cuda.enable_flash_sdp(False)
+# torch.backends.cuda.enable_mem_efficient_sdp(False)
+# torch.backends.cuda.enable_math_sdp(True)
+
 
 
 # def get_filelist(data_dir, postfixes):
@@ -407,11 +413,11 @@ def run_inference(args, gpu_num, gpu_no):
     #
     #     t_start_ratio=0.85,  # late only
     #     t_end_ratio=1.0,
-    #     every_k=8,  # 매우 드물게
+    #     every_k=4,  # 매우 드물게
     #
     #     use_fp32=True,
     #
-    #     frame_stride=2,  # 프레임 확 줄이기
+    #     frame_stride=2,
     #     max_frames=8,
     #
     #     v_mode="random",
@@ -435,9 +441,9 @@ def run_inference(args, gpu_num, gpu_no):
         rollout_k=5,  # None이면 full rollout
         hutch_n_samples=4,
         hutch_noise="rademacher", # rademacher or gaussian
-        hutch_normalize_r=False,
+        hutch_normalize_r=True,
         hutch_seed=1234,
-        hutch_pool="mean_tokens_last",
+        hutch_pool="mean",
 
         t_start_ratio=0.7,
         t_end_ratio=1.0,
@@ -447,8 +453,8 @@ def run_inference(args, gpu_num, gpu_no):
         frame_stride=2,
         max_frames=8,
 
-        v_mode="random", # # score or random
-        lambda_=0.1,
+        v_mode="score", # # score or random
+        lambda_=0.01,
         fd_eps=1e-3,
     )
 

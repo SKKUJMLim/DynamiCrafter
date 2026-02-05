@@ -11,7 +11,9 @@ from energy.jepa_score import hutchinson_trace_jtj
 
 import energy.jepa_score as js
 print("[jepa_score file]", js.__file__, flush=True)
-print("[hutch code file]", hutchinson_trace_jtj.__code__.co_filename, flush=True)
+print("[hutch code file]", js.hutchinson_trace_jtj.__code__.co_filename, flush=True)
+import energy
+print("[energy package dir]", energy.__path__, flush=True)
 
 
 

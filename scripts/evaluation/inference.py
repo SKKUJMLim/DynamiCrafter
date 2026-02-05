@@ -428,7 +428,7 @@ def run_inference(args, gpu_num, gpu_no):
     # 상단 코드를 from lvdm.models.samplers.ddim_hutch import DDIMSampler으로 바꿔줘야 함
     # -----------------------
     jepa_cfg = dict(
-        enable=False,
+        enable=True,
         energy_type="hutchinson",
         encoder_fn=vjepa,
 
@@ -447,8 +447,8 @@ def run_inference(args, gpu_num, gpu_no):
         frame_stride=2,
         max_frames=8,
 
-        v_mode="score", # # score or random
-        lambda_=0.05,
+        v_mode="random", # # score or random
+        lambda_=0.1,
         fd_eps=1e-3,
     )
 
